@@ -1,0 +1,226 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>实习工时追踪器 (InternTrack)</title>
+    <!-- 引入 FullCalendar 样式和脚本 -->
+    <script src='https://cdn.jsdelivr.net/npm/fullcalendar@6.1.8/index.global.min.js'></script>
+    <!-- 引入 Tailwind CSS 进行美化 -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif; background-color: #f3f4f6; }
+        #calendar { background: white; padding: 20px; border-radius: 12px; box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1); height: 75vh; }
+        .fc-event { cursor: pointer; border: none; }
+        /* 进度条动画 */
+        .progress-bar { transition: width 0.5s ease-in-out, background-color 0.5s ease-in-out; }
+    </style>
+</head>
+<body class="p-6">
+
+    <!-- 顶部仪表盘 -->
+    <div class="max-w-7xl mx-auto mb-6 bg-white rounded-xl shadow-md p-6">
+        <div class="flex justify-between items-center mb-4">
+            <div>
+                <h1 class="text-2xl font-bold text-gray-800">📅 实习工时记录</h1>
+                <p class="text-gray-500 text-sm">目标: 90 - 120 小时 | 鼠标拖拽日历以添加记录 | 点击记录可删除</p>
+            </div>
+            <div class="text-right">
+                <button onclick="exportData()" class="bg-blue-500 hover:bg-blue-600 text-white font-bold py-2 px-4 rounded shadow text-sm">
+                    💾 导出备份
+                </button>
+                <input type="file" id="importFile" style="display:none" onchange="importData(this)">
+                <button onclick="document.getElementById('importFile').click()" class="bg-gray-200 hover:bg-gray-300 text-gray-700 font-bold py-2 px-4 rounded shadow text-sm ml-2">
+                    📂 导入备份
+                </button>
+            </div>
+        </div>
+
+        <!-- 统计数据 -->
+        <div class="flex items-end justify-between mb-2">
+            <div>
+                <span class="text-4xl font-bold" id="totalHoursDisplay">0.0</span>
+                <span class="text-gray-500">小时 (总计)</span>
+            </div>
+            <div id="statusText" class="font-semibold px-3 py-1 rounded bg-gray-100 text-gray-600">
+                计算中...
+            </div>
+        </div>
+
+        <!-- 进度条 -->
+        <div class="w-full bg-gray-200 rounded-full h-6 dark:bg-gray-200 overflow-hidden relative">
+            <div id="progressBar" class="bg-blue-600 h-6 rounded-full progress-bar flex items-center justify-center text-xs text-white font-bold" style="width: 0%">0%</div>
+            <!-- 90h 刻度线 -->
+            <div class="absolute top-0 bottom-0 border-l-2 border-dashed border-gray-400" style="left: 75%; height: 100%; opacity: 0.5;" title="90小时及格线"></div>
+        </div>
+    </div>
+
+    <!-- 日历主体 -->
+    <div class="max-w-7xl mx-auto">
+        <div id='calendar'></div>
+    </div>
+
+    <script>
+        let calendar;
+        const TARGET_MIN = 90;
+        const TARGET_MAX = 120;
+        // 假设进度条满格是 130小时，方便显示溢出
+        const PROGRESS_MAX = 130; 
+
+        document.addEventListener('DOMContentLoaded', function() {
+            var calendarEl = document.getElementById('calendar');
+
+            // 1. 初始化日历
+            calendar = new FullCalendar.Calendar(calendarEl, {
+                initialView: 'timeGridWeek', // 默认周视图
+                headerToolbar: {
+                    left: 'prev,next today',
+                    center: 'title',
+                    right: 'dayGridMonth,timeGridWeek,timeGridDay'
+                },
+                locale: 'zh-cn', // 中文
+                firstDay: 1, // 周一为第一天
+                slotMinTime: "07:00:00", // 每天最早显示7点
+                slotMaxTime: "23:00:00", // 每天最晚显示23点
+                allDaySlot: false, // 不显示全天
+                selectable: true, // 允许拖拽选择
+                editable: true, // 允许修改
+                events: loadEvents(), // 加载保存的数据
+
+                // 2. 选中时间段，添加记录
+                select: function(info) {
+                    let note = prompt('📝 请输入工作内容 (Note):', '实习工作');
+                    if (note) {
+                        calendar.addEvent({
+                            title: note,
+                            start: info.startStr,
+                            end: info.endStr,
+                            allDay: info.allDay
+                        });
+                        saveAndCalculate();
+                    }
+                    calendar.unselect();
+                },
+
+                // 3. 拖拽修改时间或时长
+                eventChange: function(info) {
+                    saveAndCalculate();
+                },
+
+                // 4. 点击事件 (删除)
+                eventClick: function(info) {
+                    if (confirm(`❌ 确定要删除这条记录吗？\n\n内容: ${info.event.title}`)) {
+                        info.event.remove();
+                        saveAndCalculate();
+                    }
+                }
+            });
+
+            calendar.render();
+            updateStats(calendar.getEvents());
+        });
+
+        // --- 核心逻辑函数 ---
+
+        // 保存数据到 LocalStorage 并更新统计
+        function saveAndCalculate() {
+            const events = calendar.getEvents();
+            // 序列化事件
+            const eventsData = events.map(e => ({
+                title: e.title,
+                start: e.start,
+                end: e.end
+            }));
+            localStorage.setItem('internEvents', JSON.stringify(eventsData));
+            updateStats(events);
+        }
+
+        // 从 LocalStorage 加载数据
+        function loadEvents() {
+            const saved = localStorage.getItem('internEvents');
+            return saved ? JSON.parse(saved) : [];
+        }
+
+        // 更新统计条和文字
+        function updateStats(events) {
+            let totalMilliseconds = 0;
+            events.forEach(e => {
+                if (e.start && e.end) {
+                    totalMilliseconds += (e.end - e.start);
+                }
+            });
+
+            // 毫秒转小时 (保留1位小数)
+            let hours = (totalMilliseconds / (1000 * 60 * 60)).toFixed(1);
+            let displayHours = parseFloat(hours);
+
+            // 更新数字
+            document.getElementById('totalHoursDisplay').innerText = hours;
+
+            // 更新进度条 UI
+            const bar = document.getElementById('progressBar');
+            const statusText = document.getElementById('statusText');
+            
+            // 计算百分比 (相对于130小时)
+            let percentage = (displayHours / PROGRESS_MAX) * 100;
+            if (percentage > 100) percentage = 100;
+            bar.style.width = percentage + "%";
+            bar.innerText = percentage > 5 ? Math.round((displayHours/TARGET_MIN)*100) + "% (达标率)" : "";
+
+            // 颜色和状态逻辑
+            bar.classList.remove('bg-yellow-500', 'bg-green-500', 'bg-red-500', 'bg-blue-600');
+            statusText.classList.remove('text-yellow-600', 'text-green-600', 'text-red-600');
+            statusText.className = "font-semibold px-3 py-1 rounded bg-white border ";
+
+            if (displayHours < TARGET_MIN) {
+                // 未达标 (黄色)
+                bar.classList.add('bg-yellow-500');
+                statusText.classList.add('text-yellow-600', 'border-yellow-200', 'bg-yellow-50');
+                statusText.innerText = `⚠️ 还差 ${(TARGET_MIN - displayHours).toFixed(1)} 小时达标`;
+            } else if (displayHours >= TARGET_MIN && displayHours <= TARGET_MAX) {
+                // 完美区间 (绿色)
+                bar.classList.add('bg-green-500');
+                statusText.classList.add('text-green-600', 'border-green-200', 'bg-green-50');
+                statusText.innerText = `✅ 已达标！还可工作 ${(TARGET_MAX - displayHours).toFixed(1)} 小时`;
+            } else {
+                // 超标 (红色)
+                bar.classList.add('bg-red-500');
+                statusText.classList.add('text-red-600', 'border-red-200', 'bg-red-50');
+                statusText.innerText = `⛔ 警告：已超时 ${(displayHours - TARGET_MAX).toFixed(1)} 小时`;
+            }
+        }
+
+        // --- 备份功能 ---
+
+        function exportData() {
+            const data = localStorage.getItem('internEvents');
+            if (!data) { alert('没有数据可导出'); return; }
+            const blob = new Blob([data], { type: 'application/json' });
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = `实习记录备份_${new Date().toISOString().split('T')[0]}.json`;
+            a.click();
+        }
+
+        function importData(input) {
+            const file = input.files[0];
+            if (!file) return;
+            const reader = new FileReader();
+            reader.onload = function(e) {
+                try {
+                    const events = JSON.parse(e.target.result);
+                    // 清空现有并添加导入的
+                    calendar.removeAllEvents();
+                    events.forEach(evt => calendar.addEvent(evt));
+                    saveAndCalculate();
+                    alert('导入成功！');
+                } catch (err) {
+                    alert('文件格式错误，请导入正确的备份文件。');
+                }
+            };
+            reader.readAsText(file);
+        }
+    </script>
+</body>
+</html>
